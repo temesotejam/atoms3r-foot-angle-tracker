@@ -1,0 +1,24 @@
+{
+  "name": "foot_angle_v1",
+  "date": "2026-09-21",
+  "definition": "foot angle relative to body",
+  "zero_reference": "initial upright posture",
+  "positive_direction": "marker X decreases",
+  "source_experiment": {
+    "initial_static_frames": [57, 97],
+    "initial_body_tilt_cf_deg_mean": 91.043365854,
+    "quasi_static_samples": 196
+  },
+  "marker_a": {
+    "zero_x_px": 169.615317073,
+    "deg_per_px": 0.167779119,
+    "equation": "theta_deg = 0.167779119 * (169.615317073 - x_px)",
+    "observed_static_x_range_px": [42.877, 172.245]
+  },
+  "marker_b": {
+    "zero_x_px": 174.843512195,
+    "deg_per_px": 0.162645305,
+    "equation": "theta_deg = 0.162645305 * (174.843512195 - x_px)",
+    "observed_static_x_range_px": [44.315, 176.971]
+  }
+}
