@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AtomS3R Foot Angle Tracker</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module"
+    src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module">
+  </script>
+</head>
+<body>
+<main class="shell">
+  <section>
+    <p class="eyebrow">AtomS3R-CAM / white marker 1D</p>
+    <h1>Foot Angle Tracker</h1>
+    <p class="lead">
+      黒い機体上の白マーカーを1D検出し、直立姿勢を0°として
+      胴体に対する左右の足角度をリアルタイム出力します。
+    </p>
+  </section>
+
+  <section class="card install">
+    <div>
+      <p class="step">01 · Firmware</p>
+      <h2>ブラウザから書き込む</h2>
+      <p>AtomS3R-CAMをUSB接続し、Chrome / Edgeから書き込みます。</p>
+      <div id="buildInfo" class="build-info">公開ファーム情報を確認中…</div>
+    </div>
+    <esp-web-install-button id="installer">
+      <button slot="activate" class="primary">接続して書き込む</button>
+      <p slot="unsupported" class="warn">ChromeまたはEdgeを使用してください。</p>
+      <p slot="not-allowed" class="warn">HTTPSページから開いてください。</p>
+    </esp-web-install-button>
+    <div class="hint">
+      書き込みモード: Resetを約2秒長押し → 内部の緑LED点灯 → 離す。
+    </div>
+  </section>
+
+  <section class="angle-grid">
+    <div class="card">
+      <p class="step">Marker A · upper lane</p>
+      <div class="angle-value"><span id="angleA">--.--</span>°</div>
+      <div class="angle-meta">x = <span id="xA">---</span> px · <span id="rangeA">---</span></div>
+    </div>
+    <div class="card">
+      <p class="step">Marker B · lower lane</p>
+      <div class="angle-value"><span id="angleB">--.--</span>°</div>
+      <div class="angle-meta">x = <span id="xB">---</span> px · <span id="rangeB">---</span></div>
+    </div>
+  </section>
+
+  <section class="card serial-card">
+    <div class="serial-head">
+      <div>
+        <p class="step">02 · Serial</p>
+        <h2>921600 baud ログ</h2>
+        <p class="small">
+          <code>foot_angle_deg</code> が胴体基準の足角度です。
+          生の <code>cx_px</code> も常に残しています。
+        </p>
+      </div>
+      <span id="serialStatus" class="status-pill">未接続</span>
+    </div>
+    <div class="button-row">
+      <button id="serialConnect" class="primary">シリアル接続</button>
+      <button id="serialDisconnect" class="ghost" disabled>切断</button>
+      <button id="serialCopy" class="ghost">ログをコピー</button>
+      <button id="serialClear" class="ghost">クリア</button>
+    </div>
+    <pre id="serialLog" class="serial-log">未接続</pre>
+  </section>
+
+  <section class="card formulas">
+    <p class="step">Calibration v1 · 2026-09-21</p>
+    <h2>直立 = 0°</h2>
+    <p><code>A: θ = 0.167779119 × (169.615317 − x)</code></p>
+    <p><code>B: θ = 0.162645305 × (174.843512 − x)</code></p>
+    <p class="small">
+      正方向はマーカーXが小さくなる方向です。
+      <code>angle_in_range=false</code> は校正実測範囲外への外挿を示します。
+    </p>
+    <p><a href="https://github.com/temesotejam/atoms3r-foot-angle-tracker">GitHub Repository →</a></p>
+  </section>
+</main>
+
+<script>
+const installer = document.querySelector('#installer');
+const buildInfo = document.querySelector('#buildInfo');
+const manifestUrl = './manifest.json?v=' + Date.now();
+installer.setAttribute('manifest', manifestUrl);
+
+fetch(manifestUrl, {cache: 'no-store'})
+  .then(r => {
+    if (!r.ok) throw new Error('manifest HTTP ' + r.status);
+    return r.json();
+  })
+  .then(m => { buildInfo.textContent = '公開ファーム: ' + (m.version || 'unknown'); })
+  .catch(e => { buildInfo.textContent = '公開ファーム情報を取得できません: ' + e.message; });
+
+const connectButton = document.querySelector('#serialConnect');
+const disconnectButton = document.querySelector('#serialDisconnect');
+const copyButton = document.querySelector('#serialCopy');
+const clearButton = document.querySelector('#serialClear');
+const serialStatus = document.querySelector('#serialStatus');
+const serialLog = document.querySelector('#serialLog');
+
+let serialPort = null;
+let serialReader = null;
+let logBuffer = '';
+let lineBuffer = '';
+const MAX_LOG_CHARS = 4000000;
+
+function setSerialState(connected, text) {
+  serialStatus.textContent = text;
+  serialStatus.classList.toggle('connected', connected);
+  connectButton.disabled = connected;
+  disconnectButton.disabled = !connected;
+}
+
+function updateAngleCard(id, marker) {
+  const angle = document.querySelector('#angle' + id);
+  const x = document.querySelector('#x' + id);
+  const range = document.querySelector('#range' + id);
+
+  if (!marker || !marker.angle_valid) {
+    angle.textContent = '--.--';
+    x.textContent = '---';
+    range.textContent = 'invalid';
+    return;
+  }
+
+  angle.textContent = Number(marker.foot_angle_deg).toFixed(2);
+  x.textContent = Number(marker.cx_px).toFixed(2);
+  range.textContent = marker.angle_in_range ? 'calibrated' : 'extrapolated';
+}
+
+function consumeJsonLines(text) {
+  lineBuffer += text;
+  const lines = lineBuffer.split('\n');
+  lineBuffer = lines.pop();
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t.startsWith('{')) continue;
+    try {
+      const data = JSON.parse(t);
+      updateAngleCard('A', data.marker_a);
+      updateAngleCard('B', data.marker_b);
+    } catch (_) {}
+  }
+}
+
+function appendLog(text) {
+  if (serialLog.textContent === '未接続') {
+    serialLog.textContent = '';
+    logBuffer = '';
+  }
+  logBuffer += text;
+  if (logBuffer.length > MAX_LOG_CHARS) {
+    logBuffer = '[older log trimmed]\n' +
+      logBuffer.slice(logBuffer.length - MAX_LOG_CHARS);
+  }
+  serialLog.textContent = logBuffer;
+  serialLog.scrollTop = serialLog.scrollHeight;
+  consumeJsonLines(text);
+}
+
+async function connectSerial() {
+  if (!('serial' in navigator)) {
+    alert('Web Serialに対応したChrome / Edgeを使用してください。');
+    return;
+  }
+  if (serialPort) return;
+
+  const selectedPort = await navigator.serial.requestPort();
+  await selectedPort.open({baudRate: 921600, bufferSize: 65536});
+  serialPort = selectedPort;
+  setSerialState(true, '接続中 · 921600 baud');
+  appendLog('\n--- serial connected @ 921600 baud ---\n');
+
+  const decoder = new TextDecoder();
+  serialReader = selectedPort.readable.getReader();
+
+  try {
+    while (true) {
+      const {value, done} = await serialReader.read();
+      if (done) break;
+      if (value) appendLog(decoder.decode(value, {stream: true}));
+    }
+  } catch (e) {
+    appendLog('\n[serial error] ' + e + '\n');
+  } finally {
+    try { serialReader.releaseLock(); } catch (_) {}
+    serialReader = null;
+    try { await selectedPort.close(); } catch (_) {}
+    if (serialPort === selectedPort) serialPort = null;
+    setSerialState(false, '未接続');
+    appendLog('\n--- serial disconnected ---\n');
+  }
+}
+
+async function disconnectSerial() {
+  if (serialReader) {
+    await serialReader.cancel();
+    return;
+  }
+  if (serialPort) {
+    try { await serialPort.close(); } catch (_) {}
+    serialPort = null;
+  }
+  setSerialState(false, '未接続');
+}
+
+async function copyLog() {
+  const text = logBuffer || serialLog.textContent || '';
+  await navigator.clipboard.writeText(text);
+  const old = copyButton.textContent;
+  copyButton.textContent = 'コピーしました';
+  setTimeout(() => { copyButton.textContent = old; }, 1200);
+}
+
+connectButton.addEventListener('click', () => {
+  connectSerial().catch(e => {
+    appendLog('\n[connect error] ' + e + '\n');
+    setSerialState(false, '接続失敗');
+  });
+});
+disconnectButton.addEventListener('click', () => {
+  disconnectSerial().catch(e => appendLog('\n[disconnect error] ' + e + '\n'));
+});
+copyButton.addEventListener('click', () => {
+  copyLog().catch(e => appendLog('\n[copy error] ' + e + '\n'));
+});
+clearButton.addEventListener('click', () => {
+  logBuffer = '';
+  lineBuffer = '';
+  serialLog.textContent = '';
+});
+</script>
+</body>
+</html>
