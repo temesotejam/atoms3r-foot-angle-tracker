@@ -20,7 +20,7 @@ struct ImuTelemetry {
     bool tilt_static = false;
 
     // Automatic zeroing diagnostics. Upright means gravity is aligned with
-    // the expected body-up mounting direction (IMU -X) and motion is quiet.
+    // the expected body-up mounting direction (IMU -Z) and motion is quiet.
     float upright_error_deg = 180.0f;
     bool upright_candidate = false;
     uint32_t upright_stable_ms = 0;
