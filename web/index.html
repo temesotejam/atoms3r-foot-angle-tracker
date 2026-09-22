@@ -15,8 +15,8 @@
     <p class="eyebrow">AtomS3R-CAM / white marker 1D</p>
     <h1>Foot Angle Tracker</h1>
     <p class="lead">
-      黒い機体上の白マーカーを1D検出し、直立姿勢を0°として
-      胴体に対する左右の足角度をリアルタイム出力します。
+      黒い機体上の白マーカーを1D検出し、IMUで直立・静止を確認して
+      起動時に0°を自動調整し、胴体に対する左右の足角度をリアルタイム出力します。
     </p>
   </section>
 
@@ -37,6 +37,14 @@
     </div>
   </section>
 
+  <section class="card serial-card">
+    <p class="step">02 · Auto Zero</p>
+    <h2 id="zeroTitle">直立姿勢待ち</h2>
+    <p id="zeroDetail" class="small">
+      IMUの重力方向と安定性を確認しています。機体を直立・静止させてください。
+    </p>
+  </section>
+
   <section class="angle-grid">
     <div class="card">
       <p class="step">Marker A · upper lane</p>
@@ -53,7 +61,7 @@
   <section class="card serial-card">
     <div class="serial-head">
       <div>
-        <p class="step">02 · Serial</p>
+        <p class="step">03 · Serial</p>
         <h2>921600 baud ログ</h2>
         <p class="small">
           <code>foot_angle_deg</code> が胴体基準の足角度です。
@@ -72,13 +80,15 @@
   </section>
 
   <section class="card formulas">
-    <p class="step">Calibration v1 · 2026-09-21</p>
-    <h2>直立 = 0°</h2>
-    <p><code>A: θ = 0.167779119 × (169.615317 − x)</code></p>
-    <p><code>B: θ = 0.162645305 × (174.843512 − x)</code></p>
+    <p class="step">Calibration slope + auto zero v2</p>
+    <h2>IMU直立判定 → 起動時0°自動調整</h2>
+    <p><code>A: θ = 0.167779119 × (x_zero,A − x)</code></p>
+    <p><code>B: θ = 0.162645305 × (x_zero,B − x)</code></p>
     <p class="small">
-      正方向はマーカーXが小さくなる方向です。
-      <code>angle_in_range=false</code> は校正実測範囲外への外挿を示します。
+      直立判定はIMUのみで行います。重力方向が−Xから5°以内、
+      加速度ノルムが1g±0.03g、総角速度1.5°/s以下を連続2秒満たすと、
+      その間のA/BマーカーXを平均して0°を固定します。
+      <code>angle_in_range=false</code> は元の校正実測範囲外への外挿です。
     </p>
     <p><a href="https://github.com/temesotejam/atoms3r-foot-angle-tracker">GitHub Repository →</a></p>
   </section>
@@ -104,6 +114,8 @@ const copyButton = document.querySelector('#serialCopy');
 const clearButton = document.querySelector('#serialClear');
 const serialStatus = document.querySelector('#serialStatus');
 const serialLog = document.querySelector('#serialLog');
+const zeroTitle = document.querySelector('#zeroTitle');
+const zeroDetail = document.querySelector('#zeroDetail');
 
 let serialPort = null;
 let serialReader = null;
@@ -135,6 +147,47 @@ function updateAngleCard(id, marker) {
   range.textContent = marker.angle_in_range ? 'calibrated' : 'extrapolated';
 }
 
+function updateZeroStatus(zeroing, imu) {
+  if (!zeroing) return;
+
+  if (zeroing.ready) {
+    zeroTitle.textContent = '0° 自動調整完了';
+    zeroDetail.textContent =
+      'A zero = ' + Number(zeroing.zero_a_px).toFixed(2) + ' px / ' +
+      'B zero = ' + Number(zeroing.zero_b_px).toFixed(2) + ' px / ' +
+      zeroing.samples + ' samples';
+    return;
+  }
+
+  if (zeroing.state === 'imu_unavailable') {
+    zeroTitle.textContent = 'IMUが利用できません';
+    zeroDetail.textContent = 'cx_pxは取得できますが、足角度の0°は確定しません。';
+    return;
+  }
+
+  if (zeroing.state === 'waiting_markers') {
+    zeroTitle.textContent = '白マーカー待ち';
+    zeroDetail.textContent = 'IMUは直立条件内ですが、A/B両方の検出を待っています。';
+    return;
+  }
+
+  if (zeroing.state === 'collecting') {
+    zeroTitle.textContent = '直立を保持してください';
+    const stable = Number(zeroing.stable_ms || 0) / 1000;
+    zeroDetail.textContent =
+      '安定時間 ' + stable.toFixed(1) + ' / 2.0 s · ' +
+      zeroing.samples + ' samples · ' +
+      'upright error ' + Number(imu?.upright_error_deg || 0).toFixed(2) + '°';
+    return;
+  }
+
+  zeroTitle.textContent = '直立姿勢待ち';
+  zeroDetail.textContent =
+    'upright error ' + Number(imu?.upright_error_deg || 0).toFixed(2) + '° · ' +
+    'gyro ' + Number(imu?.gyro_norm_dps || 0).toFixed(2) + '°/s · ' +
+    '|a| ' + Number(imu?.accel_norm_g || 0).toFixed(3) + ' g';
+}
+
 function consumeJsonLines(text) {
   lineBuffer += text;
   const lines = lineBuffer.split('\n');
@@ -147,6 +200,7 @@ function consumeJsonLines(text) {
       const data = JSON.parse(t);
       updateAngleCard('A', data.marker_a);
       updateAngleCard('B', data.marker_b);
+      updateZeroStatus(data.zeroing, data.imu);
     } catch (_) {}
   }
 }
