@@ -3,13 +3,13 @@
 #include "app_config.h"
 
 FootAngleEstimate estimateFootAngle(
-    const WhiteMarkerObservation& marker) {
+    const WhiteMarkerObservation& marker,
+    float zero_x_px,
+    bool zero_ready) {
     FootAngleEstimate out;
 
     const bool is_a = marker.id == appcfg::kMarkerAId;
-    out.zero_x_px =
-        is_a ? appcfg::kFootAngleAZeroXPx
-             : appcfg::kFootAngleBZeroXPx;
+    out.zero_x_px = zero_x_px;
     out.deg_per_px =
         is_a ? appcfg::kFootAngleADegPerPx
              : appcfg::kFootAngleBDegPerPx;
@@ -23,14 +23,15 @@ FootAngleEstimate estimateFootAngle(
         is_a ? appcfg::kFootAngleAMaxCalXPx
              : appcfg::kFootAngleBMaxCalXPx;
 
-    out.valid = true;
     out.in_calibration_range =
         marker.center_x_px >= min_x &&
         marker.center_x_px <= max_x;
 
-    // Upright calibration position is 0 deg.
-    // Positive angle is the direction where marker X decreases.
+    // Before automatic zeroing is locked, still calculate the provisional
+    // value from the nominal calibration zero for diagnostics, but keep
+    // angle_valid=false so control/UI cannot mistake it for a tared angle.
     out.angle_deg =
         out.deg_per_px * (out.zero_x_px - marker.center_x_px);
+    out.valid = zero_ready;
     return out;
 }

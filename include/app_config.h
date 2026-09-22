@@ -64,6 +64,21 @@ static constexpr float kBodyTiltComplementaryTauS = 0.50f;
 static constexpr float kTiltStaticMaxGyroDps = 3.0f;
 static constexpr float kTiltStaticAccelNormToleranceG = 0.05f;
 
+// Automatic upright zeroing.
+//
+// On the current AtomS3R-CAM mount, gravity points approximately along IMU -X
+// when the body is upright. Upright recognition is intentionally based only
+// on IMU gravity direction + stability; marker X is never used to decide
+// whether the body is upright.
+//
+// The condition must remain continuously true before marker A/B X positions
+// are averaged and locked as the 0 deg reference for the rest of the boot.
+static constexpr float kAutoZeroMaxUprightErrorDeg = 5.0f;
+static constexpr float kAutoZeroMaxGyroDps = 1.5f;
+static constexpr float kAutoZeroAccelNormToleranceG = 0.03f;
+static constexpr uint32_t kAutoZeroStableMs = 2000;
+static constexpr uint32_t kAutoZeroMinVisionSamples = 15;
+
 static constexpr uint32_t kImuControlPeriodUs = 5000; // 200 Hz
 static constexpr uint32_t kTelemetryPeriodMs = 100;   // 10 Hz JSON
 

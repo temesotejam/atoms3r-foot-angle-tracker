@@ -11,4 +11,6 @@ struct FootAngleEstimate {
 };
 
 FootAngleEstimate estimateFootAngle(
-    const WhiteMarkerObservation& marker);
+    const WhiteMarkerObservation& marker,
+    float zero_x_px,
+    bool zero_ready);
