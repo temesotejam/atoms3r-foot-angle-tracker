@@ -26,10 +26,90 @@ uint32_t g_max_vision_us = 0;
 uint32_t g_frame_dt_us = 0;
 uint64_t g_last_frame_timestamp_us = 0;
 
+struct AutoZeroState {
+    bool ready = false;
+    bool collecting = false;
+    uint32_t samples = 0;
+    uint32_t last_upright_stable_ms = 0;
+    float sum_a_x = 0.0f;
+    float sum_b_x = 0.0f;
+    float zero_a_x =
+        appcfg::kFootAngleAZeroXPx;
+    float zero_b_x =
+        appcfg::kFootAngleBZeroXPx;
+};
+
+AutoZeroState g_auto_zero;
+
 float wrapAngleDeg(float deg) {
     while (deg > 180.0f) deg -= 360.0f;
     while (deg < -180.0f) deg += 360.0f;
     return deg;
+}
+
+ImuTelemetry getImuSnapshot() {
+    ImuTelemetry imu;
+    portENTER_CRITICAL(&g_imu_mux);
+    imu = g_imu;
+    portEXIT_CRITICAL(&g_imu_mux);
+    return imu;
+}
+
+void resetAutoZeroCollection() {
+    if (g_auto_zero.ready) return;
+    g_auto_zero.collecting = false;
+    g_auto_zero.samples = 0;
+    g_auto_zero.last_upright_stable_ms = 0;
+    g_auto_zero.sum_a_x = 0.0f;
+    g_auto_zero.sum_b_x = 0.0f;
+}
+
+void updateAutoZero(const ImuTelemetry& imu,
+                    const WhiteMarkerObservation& a,
+                    const WhiteMarkerObservation& b) {
+    if (g_auto_zero.ready) return;
+
+    const bool markers_valid = a.valid && b.valid;
+    if (!imu.enabled || !imu.upright_candidate || !markers_valid) {
+        resetAutoZeroCollection();
+        return;
+    }
+
+    // If the 200 Hz IMU task observed even a brief instability between two
+    // camera frames, upright_stable_ms will restart from zero. Detect that
+    // restart here and discard the partially accumulated marker average.
+    if (g_auto_zero.collecting &&
+        imu.upright_stable_ms <
+            g_auto_zero.last_upright_stable_ms) {
+        resetAutoZeroCollection();
+    }
+
+    g_auto_zero.collecting = true;
+    g_auto_zero.sum_a_x += a.center_x_px;
+    g_auto_zero.sum_b_x += b.center_x_px;
+    ++g_auto_zero.samples;
+    g_auto_zero.last_upright_stable_ms =
+        imu.upright_stable_ms;
+
+    if (imu.upright_stable_ms >= appcfg::kAutoZeroStableMs &&
+        g_auto_zero.samples >= appcfg::kAutoZeroMinVisionSamples) {
+        const float n =
+            static_cast<float>(g_auto_zero.samples);
+        g_auto_zero.zero_a_x =
+            g_auto_zero.sum_a_x / n;
+        g_auto_zero.zero_b_x =
+            g_auto_zero.sum_b_x / n;
+        g_auto_zero.ready = true;
+        g_auto_zero.collecting = false;
+
+        Serial.printf(
+            "AUTO_ZERO_LOCKED: A=%.3f px, B=%.3f px, samples=%u, "
+            "upright_stable_ms=%u\n",
+            g_auto_zero.zero_a_x,
+            g_auto_zero.zero_b_x,
+            g_auto_zero.samples,
+            imu.upright_stable_ms);
+    }
 }
 
 void controlStep(const ImuTelemetry&) {
@@ -48,6 +128,7 @@ void imuControlTask(void*) {
     bool tilt_initialized = false;
     float tilt_cf_deg = 0.0f;
     uint64_t last_tilt_timestamp_us = 0;
+    uint64_t upright_start_us = 0;
 
     for (;;) {
         const uint32_t t0 = micros();
@@ -116,6 +197,48 @@ void imuControlTask(void*) {
                     appcfg::kTiltStaticMaxGyroDps &&
                 fabsf(sample.accel_norm_g - 1.0f) <=
                     appcfg::kTiltStaticAccelNormToleranceG;
+
+            // Upright recognition for automatic zeroing.
+            // Current hardware: body upright => gravity approximately IMU -X.
+            if (sample.accel_norm_g > 0.1f) {
+                float gravity_alignment =
+                    -sample.ax / sample.accel_norm_g;
+                if (gravity_alignment > 1.0f) gravity_alignment = 1.0f;
+                if (gravity_alignment < -1.0f) gravity_alignment = -1.0f;
+
+                sample.upright_error_deg =
+                    acosf(gravity_alignment) *
+                    57.2957795131f;
+
+                sample.upright_candidate =
+                    sample.upright_error_deg <=
+                        appcfg::kAutoZeroMaxUprightErrorDeg &&
+                    sample.gyro_norm_dps <=
+                        appcfg::kAutoZeroMaxGyroDps &&
+                    fabsf(sample.accel_norm_g - 1.0f) <=
+                        appcfg::kAutoZeroAccelNormToleranceG;
+            }
+
+            if (sample.upright_candidate) {
+                if (upright_start_us == 0) {
+                    upright_start_us =
+                        sample.sample_timestamp_us;
+                }
+
+                const uint64_t stable_us =
+                    sample.sample_timestamp_us -
+                    upright_start_us;
+                sample.upright_stable_ms =
+                    stable_us > 0xffffffffULL * 1000ULL
+                        ? 0xffffffffU
+                        : static_cast<uint32_t>(
+                            stable_us / 1000ULL);
+            } else {
+                upright_start_us = 0;
+                sample.upright_stable_ms = 0;
+            }
+        } else {
+            upright_start_us = 0;
         }
 
         const uint32_t step_us = micros() - t0;
@@ -137,15 +260,17 @@ void imuControlTask(void*) {
 }
 
 void printMarkerJson(const char* name,
-                     const WhiteMarkerObservation& marker) {
+                     const WhiteMarkerObservation& marker,
+                     float zero_x_px,
+                     bool zero_ready) {
     const FootAngleEstimate angle =
-        estimateFootAngle(marker);
+        estimateFootAngle(marker, zero_x_px, zero_ready);
 
     Serial.printf(
         "\"%s\":{\"valid\":%s,\"source\":\"%s\",\"id\":%d,"
         "\"cx_px\":%.3f,\"cy_px\":%.1f,"
         "\"foot_angle_deg\":%.3f,\"angle_valid\":%s,"
-        "\"angle_in_range\":%s,"
+        "\"angle_in_range\":%s,\"zero_x_px\":%.3f,"
         "\"peak_x_px\":%d,\"peak_contrast\":%.2f,"
         "\"weight_sum\":%.2f,\"bright_width_px\":%d,"
         "\"detect_ok\":%u,\"detect_fail\":%u,\"vision_us\":%u}",
@@ -158,6 +283,7 @@ void printMarkerJson(const char* name,
         angle.angle_deg,
         angle.valid ? "true" : "false",
         angle.in_calibration_range ? "true" : "false",
+        angle.zero_x_px,
         marker.peak_x_px,
         marker.peak_contrast,
         marker.weight_sum,
@@ -167,29 +293,39 @@ void printMarkerJson(const char* name,
         marker.processing_us);
 }
 
+const char* autoZeroStateName(const ImuTelemetry& imu,
+                              const WhiteMarkerObservation& a,
+                              const WhiteMarkerObservation& b) {
+    if (g_auto_zero.ready) return "locked";
+    if (!imu.enabled) return "imu_unavailable";
+    if (!imu.upright_candidate) return "waiting_upright";
+    if (!a.valid || !b.valid) return "waiting_markers";
+    return "collecting";
+}
+
 void printTelemetry(const CameraFrame& frame,
                     const WhiteMarkerObservation& a,
                     const WhiteMarkerObservation& b,
-                    uint32_t total_vision_us) {
-    ImuTelemetry imu;
-    portENTER_CRITICAL(&g_imu_mux);
-    imu = g_imu;
-    portEXIT_CRITICAL(&g_imu_mux);
-
+                    uint32_t total_vision_us,
+                    const ImuTelemetry& imu) {
     Serial.printf(
         "{\"t_us\":%llu,\"frame\":%u,\"frame_t_us\":%llu,"
         "\"frame_dt_us\":%u,\"camera_failures\":%u,"
         "\"camera\":{\"width\":%d,\"height\":%d,\"bytes\":%u},"
         "\"vision_mode\":\"white_sparse_1d\","
-        "\"angle_mode\":\"body_relative_foot_upright_zero_v1\","
+        "\"angle_mode\":\"body_relative_foot_auto_zero_v2\","
         "\"vision_total_us\":%u,\"vision_max_us\":%u,"
+        "\"zeroing\":{\"ready\":%s,\"state\":\"%s\","
+        "\"samples\":%u,\"stable_ms\":%u,"
+        "\"zero_a_px\":%.3f,\"zero_b_px\":%.3f},"
         "\"imu\":{\"enabled\":%s,\"sample_t_us\":%llu,"
         "\"loops\":%u,\"misses\":%u,\"max_step_us\":%u,"
         "\"ax\":%.5f,\"ay\":%.5f,\"az\":%.5f,"
         "\"gx\":%.5f,\"gy\":%.5f,\"gz\":%.5f,"
         "\"accel_norm_g\":%.5f,\"gyro_norm_dps\":%.5f,"
         "\"body_tilt_acc_deg\":%.3f,\"body_tilt_cf_deg\":%.3f,"
-        "\"tilt_static\":%s},",
+        "\"tilt_static\":%s,\"upright_error_deg\":%.3f,"
+        "\"upright_candidate\":%s,\"upright_stable_ms\":%u},",
         static_cast<unsigned long long>(esp_timer_get_time()),
         g_frame_count,
         static_cast<unsigned long long>(frame.timestamp_us),
@@ -200,6 +336,12 @@ void printTelemetry(const CameraFrame& frame,
         static_cast<unsigned>(frame.length),
         total_vision_us,
         g_max_vision_us,
+        g_auto_zero.ready ? "true" : "false",
+        autoZeroStateName(imu, a, b),
+        g_auto_zero.samples,
+        imu.upright_stable_ms,
+        g_auto_zero.zero_a_x,
+        g_auto_zero.zero_b_x,
         imu.enabled ? "true" : "false",
         static_cast<unsigned long long>(imu.sample_timestamp_us),
         imu.loop_count,
@@ -211,11 +353,20 @@ void printTelemetry(const CameraFrame& frame,
         imu.gyro_norm_dps,
         imu.body_tilt_acc_deg,
         imu.body_tilt_cf_deg,
-        imu.tilt_static ? "true" : "false");
+        imu.tilt_static ? "true" : "false",
+        imu.upright_error_deg,
+        imu.upright_candidate ? "true" : "false",
+        imu.upright_stable_ms);
 
-    printMarkerJson("marker_a", a);
+    printMarkerJson(
+        "marker_a", a,
+        g_auto_zero.zero_a_x,
+        g_auto_zero.ready);
     Serial.print(",");
-    printMarkerJson("marker_b", b);
+    printMarkerJson(
+        "marker_b", b,
+        g_auto_zero.zero_b_x,
+        g_auto_zero.ready);
     Serial.println("}");
 }
 
@@ -228,16 +379,20 @@ void setup() {
     Serial.println();
     Serial.println("AtomS3R Foot Angle Tracker boot");
     Serial.println("Upper white marker=A / lower white marker=B");
-    Serial.println("Angle definition: foot relative to body; upright initial posture=0 deg");
+    Serial.println(
+        "Angle definition: foot relative to body; auto-tared upright=0 deg");
     Serial.println("Positive direction: marker X moves left");
     Serial.printf(
-        "Calibration A: theta=%.9f*(%.6f-x) deg\n",
-        appcfg::kFootAngleADegPerPx,
-        appcfg::kFootAngleAZeroXPx);
+        "Auto zero: gravity -X within %.1f deg, |a|-1g <= %.3f g, "
+        "gyro <= %.1f dps, stable >= %u ms\n",
+        appcfg::kAutoZeroMaxUprightErrorDeg,
+        appcfg::kAutoZeroAccelNormToleranceG,
+        appcfg::kAutoZeroMaxGyroDps,
+        appcfg::kAutoZeroStableMs);
     Serial.printf(
-        "Calibration B: theta=%.9f*(%.6f-x) deg\n",
-        appcfg::kFootAngleBDegPerPx,
-        appcfg::kFootAngleBZeroXPx);
+        "Calibration slopes: A=%.9f deg/px, B=%.9f deg/px\n",
+        appcfg::kFootAngleADegPerPx,
+        appcfg::kFootAngleBDegPerPx);
 
     if (!psramFound()) {
         Serial.println("FATAL: PSRAM not detected");
@@ -260,7 +415,8 @@ void setup() {
 
     if (!imu_ok || !M5.Imu.isEnabled()) {
         Serial.println(
-            "WARNING: BMI270 unavailable; camera foot angle still works");
+            "WARNING: BMI270 unavailable; cx_px continues but "
+            "auto-zero cannot lock and angle_valid stays false");
     }
 
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -278,7 +434,7 @@ void setup() {
     }
 
     Serial.println(
-        "READY: QVGA grayscale / white1d / foot_angle_deg / 921600 baud");
+        "READY: hold body upright and still until AUTO_ZERO_LOCKED");
 }
 
 void loop() {
@@ -315,13 +471,16 @@ void loop() {
         g_max_vision_us = vision_us;
     }
 
+    const ImuTelemetry imu = getImuSnapshot();
+    updateAutoZero(imu, a, b);
+
     g_camera.release();
 
     const uint32_t now_ms = millis();
     if (now_ms - g_last_telemetry_ms >=
         appcfg::kTelemetryPeriodMs) {
         g_last_telemetry_ms = now_ms;
-        printTelemetry(frame, a, b, vision_us);
+        printTelemetry(frame, a, b, vision_us, imu);
     }
 
     delay(1);
