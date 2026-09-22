@@ -66,7 +66,7 @@ static constexpr float kTiltStaticAccelNormToleranceG = 0.05f;
 
 // Automatic upright zeroing.
 //
-// On the current AtomS3R-CAM mount, gravity points approximately along IMU -X
+// On the current AtomS3R-CAM mount, gravity points approximately along IMU -Z
 // when the body is upright. Upright recognition is intentionally based only
 // on IMU gravity direction + stability; marker X is never used to decide
 // whether the body is upright.

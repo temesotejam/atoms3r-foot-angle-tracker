@@ -13,7 +13,7 @@ reference.
 
 Current hardware mounting:
 
-    upright gravity direction = IMU -X
+    upright gravity direction = IMU -Z
 
 A 200 Hz IMU sample is an upright candidate only when all conditions are true:
 
