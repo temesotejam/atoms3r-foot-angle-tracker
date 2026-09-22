@@ -199,10 +199,11 @@ void imuControlTask(void*) {
                     appcfg::kTiltStaticAccelNormToleranceG;
 
             // Upright recognition for automatic zeroing.
-            // Current hardware: body upright => gravity approximately IMU -X.
+            // Measured upright hardware pose: gravity approximately IMU -Z
+            // (ax ~= 0 g, ay ~= 0 g, az ~= -1 g).
             if (sample.accel_norm_g > 0.1f) {
                 float gravity_alignment =
-                    -sample.ax / sample.accel_norm_g;
+                    -sample.az / sample.accel_norm_g;
                 if (gravity_alignment > 1.0f) gravity_alignment = 1.0f;
                 if (gravity_alignment < -1.0f) gravity_alignment = -1.0f;
 
@@ -383,7 +384,7 @@ void setup() {
         "Angle definition: foot relative to body; auto-tared upright=0 deg");
     Serial.println("Positive direction: marker X moves left");
     Serial.printf(
-        "Auto zero: gravity -X within %.1f deg, |a|-1g <= %.3f g, "
+        "Auto zero: gravity -Z within %.1f deg, |a|-1g <= %.3f g, "
         "gyro <= %.1f dps, stable >= %u ms\n",
         appcfg::kAutoZeroMaxUprightErrorDeg,
         appcfg::kAutoZeroAccelNormToleranceG,
