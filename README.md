@@ -11,7 +11,7 @@ AtomS3R-CAMで、黒い機体上の2つの白マーカーから
 
 - Marker A = 上側レーン
 - Marker B = 下側レーン
-- 初期直立姿勢 = 0 deg
+- 起動時にIMUで確認した直立・静止姿勢 = 0 deg
 - 正方向 = 白マーカーのX位置が小さくなる方向
 - 出力 = 足・脚剛体リンクの**胴体に対する相対角度**
 
@@ -50,11 +50,47 @@ B:
 - template matchingなし
 - pyramidなし
 - Otsuなし
-- `cx_px` から `foot_angle_deg` を即時計算
+- IMU重力方向＋安定性から起動時0°を自動調整
+- 自動調整後、`cx_px` から `foot_angle_deg` を即時計算
 - BMI270は独立200 Hzタスク
 - JSON telemetry 10 Hz / 921600 baud
 - GitHub Pagesからブラウザ書き込み
 - Web SerialでA/B角度をリアルタイム表示
+
+## Automatic upright zero v2
+
+起動時の0°は固定X値ではなく、実機のその起動時の直立姿勢から決めます。
+
+直立判定は**IMUのみ**で行い、白マーカー位置は直立判定には使いません。
+現在の取り付けでは直立時の重力方向がIMU -X方向に対応します。
+
+以下を連続2秒満たした場合だけゼロ平均を進めます。
+
+- 重力方向がIMU -Xから5°以内
+- 加速度ノルムが1 g ±0.03 g
+- 3軸合成角速度が1.5 deg/s以下
+- A/B両方の白マーカーが有効
+
+途中でIMU条件またはマーカー検出が崩れた場合、それまでの平均は破棄して最初からやり直します。
+条件成立中に最低15画像サンプルを平均し、
+
+    x_zero,A = mean(cx_A)
+    x_zero,B = mean(cx_B)
+
+として、その起動中は再ゼロ化しません。
+
+角度は
+
+    theta_A = 0.167779119 * (x_zero,A - x_A)
+    theta_B = 0.162645305 * (x_zero,B - x_B)
+
+で求めます。
+
+自動ゼロ確定前も生の `cx_px` と暫定角度値はログへ出しますが、
+`angle_valid=false` とするため、制御やWeb UIでは有効角度として扱いません。
+
+> IMUが判断できるのは「胴体が直立していること」です。
+> そのため、起動時には足も意図した0°姿勢にしておくことが前提です。
 
 ## Telemetry
 
@@ -79,7 +115,7 @@ B:
 
 トップレベルには
 
-    angle_mode = "body_relative_foot_upright_zero_v1"
+    angle_mode = "body_relative_foot_auto_zero_v2"
 
 を出します。
 
@@ -96,11 +132,13 @@ IMUログも残しているため、胴体絶対姿勢との組み合わせや
 1. 白マーカーを現在のA/B位置に取り付ける
 2. Pagesから最新版を書き込む
 3. 921600 baudでシリアル接続
-4. 直立でA/Bが約0°付近になることを確認
-5. 足を胴体に対して傾ける
-6. `foot_angle_deg` が連続的に変化することを確認
-7. `detect_fail=0` と `imu.misses=0` を確認
-8. 校正範囲内では `angle_in_range=true` であることを確認
+4. 足も0°姿勢にして機体を直立・静止させる
+5. Web UIまたはログで `zeroing.ready=true` になるまで保持する
+6. 自動ゼロ後にA/Bが0°付近になることを確認
+7. 足を胴体に対して傾ける
+8. `foot_angle_deg` が連続的に変化することを確認
+9. `detect_fail=0` と `imu.misses=0` を確認
+10. 校正範囲内では `angle_in_range=true` であることを確認
 
 ## Repository scope
 
